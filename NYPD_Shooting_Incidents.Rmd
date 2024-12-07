@@ -1,0 +1,239 @@
+---
+title: "NYPD_shootings"
+output: html_document
+date: "2024-11-02"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+Question of Interest: Are there any general trend or outliers to NYPD shooting incidents over time and what underlying factors could have contributed to them?
+
+# Datasource
+List of every shooting incident that occurred in NYC going back to 2006 through the end of the previous calendar year from data.gov.
+https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic
+https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD
+
+```{r}
+library(tidyr)
+library(magrittr) 
+library(lubridate)
+library(dplyr)
+library(knitr)
+library(ggplot2)
+library(forecast)
+shootings=read.csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+kable(head(shootings, 10))
+summary(shootings)
+
+```
+# Cleaning data
+In this section I correct data types, handle nulls and deal with erroneous data. Combined date and time to make them one datetime field. Perp categorical colums age, race, and sex had some empty data points and erroneous (null) string text that I made into nulls. Age group for both perp and had some values that are just numbers that I changed to unknown. I filled (null), na, and blanks in location description fields with NONE to align these columns. I also saw that LOC_CLASSFCTN_DESC had two "other" values combined them to reduce data values in summary for the categorical column. I identified most of these data issues through the summary and looking into distinct values for each categorical column. I identified a few remaining nulls and choose to remove them entirely from the data set. Then finally I made sure to change all categorical columns to factor variables.
+```{r}
+#make datetime
+shootings<-
+  shootings %>%unite("Occur_datetime",c(OCCUR_DATE, OCCUR_TIME),sep=" " )
+shootings <- shootings %>%
+  mutate(Occur_datetime = mdy_hms(Occur_datetime))
+
+# look into categorical columns
+distinct_values <- shootings %>%
+  summarise(across(c(BORO,LOC_OF_OCCUR_DESC,PRECINCT,JURISDICTION_CODE,LOC_CLASSFCTN_DESC,LOCATION_DESC,STATISTICAL_MURDER_FLAG,
+  PERP_AGE_GROUP,PERP_SEX,PERP_RACE,VIC_AGE_GROUP,VIC_SEX,VIC_RACE), ~ list(unique(as.character(.))))) %>%
+  pivot_longer(
+     cols = everything(), 
+     names_to = "column", 
+     values_to = "distinct_values"
+  ) %>%
+  unnest(distinct_values) %>%
+  arrange(column) 
+print(distinct_values,n=186)
+
+
+#fill blanks,null, and (null) with unknown or U for categorical columns about perp and vic 
+shootings <- shootings %>%
+  mutate(across(c(PERP_AGE_GROUP,PERP_RACE), ~ ifelse(is.na(.) | . == ""| . == "(null)", "UNKNOWN", .)))
+shootings <- shootings %>%
+  mutate(across(PERP_SEX, ~ ifelse(is.na(.) | . == ""| . == "(null)", "U", .)))
+
+#fill (null),na, and blanks in location descriptions with NONE
+shootings <- shootings %>%
+  mutate(across(c(LOC_OF_OCCUR_DESC,LOC_CLASSFCTN_DESC,LOCATION_DESC), ~ ifelse(is.na(.) | . == ""| . == "(null)", "NONE", .)))
+
+#deal with errors in categories
+# age group has some values that are just numbers change to unknown
+shootings <- shootings %>%
+  mutate(across(c(PERP_AGE_GROUP,VIC_AGE_GROUP),~ ifelse(grepl("^[0-9]+$", .), "UNKNOWN", .)))
+# LOC_CLASSFCTN_DESC has two "other" values combine them
+shootings <- shootings %>%
+  mutate(across((LOC_CLASSFCTN_DESC), ~ ifelse(.== "OTHER"|.=="(Other)", "(Other)", .)))
+
+#change categorical columns to factor
+shootings <- shootings %>%
+  mutate(across(c(BORO,PRECINCT, JURISDICTION_CODE, LOC_OF_OCCUR_DESC, LOC_CLASSFCTN_DESC,LOCATION_DESC,PERP_AGE_GROUP,PERP_SEX,PERP_RACE,VIC_AGE_GROUP,VIC_SEX, VIC_RACE,STATISTICAL_MURDER_FLAG), as.factor))
+
+#get rid of remaining NAs 59 in lat and long, and 2 in Jurisdiction code
+shootings <- shootings %>%filter(!is.na(Latitude)&!is.na(Longitude)&!is.na(JURISDICTION_CODE))
+```
+
+# Output after cleaning
+```{r}
+kable(head(shootings, 10))
+summary(shootings)
+```
+
+Roughly about half the data set is missing a perp age group. All the location descriptions also have a lot of missing values. These values are still included under either unknown or none depending on the category. An analysis factoring these columns will need to take this under consideration for potential issues. For example, not knowing how that data is populated some locations may be more likely to have descriptions than others which can lead to incorrect conclusions.
+
+# Visualizations
+The first visualization I output was solely NYPD shootings by year and then I output by borough to see if there was any noticeable trends. I noticed a large spike in 2020 so decided look closer and see a trend by month. A significant spike can be seen from may 2020 to oct 2020 and some overall seasonal trends for shootings seem to appear for entire data set. I then choose to look the latest 5 years of the data set to get a closer look at the 2020 increase specifically and then broke it up by borough. This increase can also be seen in each borough with the Bronx and Brooklyn having the largest increase.
+```{r, fig.width=15, fig.height=8, out.width="100%"}
+#Looking into data over time
+#NYPD shootings over years
+grouped_df <- shootings %>%
+  mutate(year = year(Occur_datetime)) %>%
+  group_by(year) %>%
+  summarise(occurrences = n())
+ggplot(grouped_df, aes(x = year, y = occurrences)) +
+  geom_line() + 
+  geom_point() +  
+  labs(title = "NYPD Shootings by Year", x = "Date", y = "Occurrences") +
+  theme_minimal()+
+  scale_x_continuous(breaks = seq(min(grouped_df$year),max(grouped_df$year), by = 1))+
+  geom_smooth(method = "lm", color = "red", se = FALSE) 
+
+# NYPD shootings by Boro over years
+boro_grouped_df <- shootings %>%
+  mutate(year = year(Occur_datetime)) %>%
+  group_by(BORO, year) %>%
+  summarise(occurrences = n(), .groups = 'drop')
+ggplot(boro_grouped_df, aes(x = year, y = occurrences, color = BORO, group = BORO)) +
+  geom_line() + 
+  geom_point() + 
+  labs(title = "Shootings by Year for Each Borough", 
+       x = "Year", y = "Occurrences") +
+  theme_minimal() +
+  scale_x_continuous(
+    breaks = seq(min(boro_grouped_df$year), max(boro_grouped_df$year), by = 1) 
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+grouped_my_df <- shootings %>%
+  mutate(monthyear = floor_date(Occur_datetime, "month")) %>%
+  group_by(monthyear) %>%
+  summarise(occurrences = n(), .groups = 'drop') %>%
+  mutate(monthyear = as.Date(monthyear))
+ggplot(grouped_my_df, aes(x = monthyear, y = occurrences)) +
+  geom_line() + 
+  geom_point() +  
+  labs(title = "NYPD Shootings by Month", x = "Date", y = "Occurrences") +
+  theme_minimal()+
+  scale_x_date(
+    date_breaks = "3 month",        
+    date_labels = "%b %Y"            
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_smooth(method = "lm", color = "red", se = FALSE) 
+
+
+```
+
+```{r, fig.width=15, fig.height=8, out.width="100%"}
+
+#looking into last 5 years of data set to investigate increase in 2020-2022
+date_filtered_df <- shootings %>%
+  filter(year(Occur_datetime) >= (2019))
+  
+grouped_df <- date_filtered_df %>%
+  mutate(monthyear = floor_date(Occur_datetime, "month")) %>%
+  group_by(monthyear) %>%
+  summarise(occurrences = n()) %>%
+  mutate(monthyear = as.Date(monthyear))
+ggplot(grouped_df, aes(x = monthyear, y = occurrences)) +
+  geom_line() + 
+  geom_point() +  
+  labs(title = "NYPD Shootings by Month 2019-2023", x = "Date", y = "Occurrences") +
+  theme_minimal()+
+  scale_x_date(
+    date_breaks = "1 month",        
+    date_labels = "%b %Y"            
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_smooth(method = "lm", color = "red", se = FALSE) 
+
+#by boro
+boro_grouped_df <- date_filtered_df %>%
+  mutate(monthyear = floor_date(Occur_datetime, "month")) %>%
+  group_by(BORO, monthyear) %>%
+  summarise(occurrences = n(), .groups = 'drop') %>%
+  mutate(monthyear = as.Date(monthyear))
+ggplot(boro_grouped_df, aes(x = monthyear, y = occurrences, color = BORO, group = BORO)) +
+  geom_line() + 
+  geom_point() + 
+  labs(title = "Shootings by Month 2019-2023 for Each Borough", 
+       x = "Month/year", y = "Occurrences") +
+  theme_minimal() +
+  scale_x_date(
+    date_breaks = "1 month",        
+    date_labels = "%b %Y"            
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+
+# Analysis/Models
+The below linear models and correlation trends give numbers to show how significant the last 5 years of the data set were to the overall trend of NY shootings by year. Overall the entire data set the correlation between year and number of shootings is only -.487, but if I take out the last 5 years correlation jumps to -.938. I also moved away from linear models to an ETS model to better handle time series and what appeared to be a seasonal impact on shootings excluding the last 5 years. The high alpha shows that most recent data points carry a majority of the weight for forecasting and the ACF1 value tells me the model has captured most of the data patterns, but the error is relatively high though so would not be the most reliable model for forecasting.
+```{r, fig.width=15, fig.height=8, out.width="100%"}
+
+#linear model year against occurrences
+date_unfiltered_df <- shootings %>%
+  mutate(year = as.numeric(year(Occur_datetime)))%>%   
+  group_by(year) %>%
+  summarise(occurrences = n(), .groups = "drop")
+lm_model <- lm(occurrences ~ year, data = date_unfiltered_df)
+summary(lm_model)
+correlation <- cor(date_unfiltered_df$year, date_unfiltered_df$occurrences)
+print(correlation)
+
+#linear model year against occurrences 2006-2019
+date_unfiltered_df <- shootings %>%
+  mutate(year = as.numeric(year(Occur_datetime)))%>%   
+  group_by(year) %>%
+  filter(year<2019) %>%
+  summarise(occurrences = n(), .groups = "drop")
+lm_model <- lm(occurrences ~ year, data = date_unfiltered_df)
+summary(lm_model)
+correlation <- cor(date_unfiltered_df$year, date_unfiltered_df$occurrences)
+print(correlation)
+
+#linear model year against occurrences last 5 years
+m_date_filtered_df <- date_filtered_df %>%
+  mutate(year = as.numeric(year(Occur_datetime)))%>%   
+  group_by(year) %>%
+  summarise(occurrences = n(), .groups = "drop")
+lm_model <- lm(occurrences ~ year, data = m_date_filtered_df)
+summary(lm_model)
+correlation <- cor(m_date_filtered_df$year, m_date_filtered_df$occurrences)
+print(correlation)
+
+#filtering out last 5 years looking into ets model to get info for potential forecasting in the future.
+ts_data <- ts(date_unfiltered_df$occurrences, start=c(2006, 1), frequency=12)
+ets_model <- ets(ts_data)
+summary(ets_model)
+
+#using all data for ets model to get info for potential forecasting in the future.
+ts_data <- ts(grouped_my_df$occurrences, start=c(2006, 1), frequency=12)
+ets_model <- ets(ts_data)
+summary(ets_model)
+
+plot(forecast(ets_model), main="ETS Model Forecast", xlab="Year", ylab="Occurrences")
+```
+
+# Conclusion
+
+Generally it looks like shootings in NYPD and its boroughs have been declining or remaining constant from 2006-2023. In 2020 and 2021 there was a drastic increase in shootings that went against the overall trend. Especially in Brooklyn and the Bronx whose shootings each doubled from 2019 in either of the following two months. This can be shown by the significant negative correlation of years to shootings from 2006 to 2019 compared to the minimal correlation over the last 5 years of the data set. It appears a large part of this increase is from May 2020 to October 2020. This aligns well with the COVID, COVID lockdown in the US, and its impacts on human interactions throughout the US. 
+
+These findings bring up more questions such as were other major US cities seeing this increase in shootings that correlate with COVID? Why the Bronx and Brooklyn increased so significantly compared to other boroughs? Another important question would be why shootings remained rather high in 2021 and 2022, it is worth investigating this time frame to see if the increase would still correlate with the impacts of COVID or if it is something else?  
+
+Regarding bias, I believe my analysis has the most bias. Regarding the data set I don't have too much knowledge of New York and data on shootings is something I have never really considered looking into before. My bias comes in when seeing the data spike in 2020, my immediate guess was COVID was the a big factor for it. That may have caused bias so I attempted to mitigate it by showing 5 years of data by month along with 2020. This shows that there are other noticeable spikes like in mid 2021 that cannot be as easily explained by the COVID. Also, note that COVID was just one of the factors that could have contributed to a rise in shootings, another potential factor could be the unrest and protests regarding George Floyd and there could be many more factors.
+
