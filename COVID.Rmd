@@ -1,0 +1,328 @@
+---
+title: "COVID Data"
+output: html_document
+date: "2024-12-02"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Datasource
+https://github.com/CSSEGISandData/COVID-19/tree/4360e50239b4eb6b22f3a1759323748f36752177/csse_covid_19_data/csse_covid_19_time_series
+The data source is from a COVID-19 Data Repository by the Center for Systems Science and Engineering (CSSE) at Johns Hopkins University. The data from the repository pulled into this report include daily reports of COVID cases and deaths. 2 sources focus on just the US while the other 2 are global.
+
+Question of Interest: Are there any geographical or demographic trends to COVID cases and deaths seen in the time series data?
+
+
+```{r}
+library(tidyr)
+library(magrittr) 
+library(lubridate)
+library(dplyr)
+library(knitr)
+library(ggplot2)
+library(sf)
+library(maps)
+
+us_cases=read.csv("https://github.com/CSSEGISandData/COVID-19/raw/4360e50239b4eb6b22f3a1759323748f36752177/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_US.csv")
+global_cases=read.csv("https://github.com/CSSEGISandData/COVID-19/raw/4360e50239b4eb6b22f3a1759323748f36752177/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv")
+us_deaths=read.csv("https://github.com/CSSEGISandData/COVID-19/raw/4360e50239b4eb6b22f3a1759323748f36752177/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv")
+global_deaths=read.csv("https://github.com/CSSEGISandData/COVID-19/raw/4360e50239b4eb6b22f3a1759323748f36752177/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv")
+
+```
+# Cleaning data
+
+In this section I correct data types, handle nulls, and put data into a usable format. First I pivoted each of the 4 tables, removed any unnecessary columns and removed the leading X from the date columns. Then I combined the US cases/deaths into one table as well and changed date to a date type, and then did the same for global data. From here I removed any day where there were no cases or deaths recorded from each table. Wanted to grab population info as well for the global data set so grabbed that from the github repo and joined it. Finally I checked the population data as some were returning null populations which seemed to be caused by invalid state or country. For example the winter olympics are listed as a state and another one is a Canadian cruise ship. Still worth keeping in data for overall for cases and deaths but good to note for future geographical analysis.
+```{r}
+#pivot each table and remove some columns
+global_cases<- global_cases%>%
+  pivot_longer(cols=-c(Province.State, Country.Region,Lat, Long),
+               names_to="date",
+               values_to="cases",
+               names_transform = list(date = ~ gsub("^X", "", .)) # Remove the leading "X"
+              ) %>%
+  select(-c(Lat,Long))
+
+us_cases<- us_cases%>%
+  pivot_longer(cols=-c(Province_State,Country_Region,Combined_Key, Admin2,Lat, Long_, UID, iso3,iso2,code3,FIPS),
+               names_to="date",
+               values_to="cases",
+               names_transform = list(date = ~ gsub("^X", "", .)) # Remove the leading "X"
+              ) %>%
+  select(-c(Lat,Long_, UID, iso3,iso2,code3,FIPS,Country_Region))
+
+global_deaths<- global_deaths%>%
+  pivot_longer(cols=-c(Province.State, Country.Region,Lat, Long),
+               names_to="date",
+               values_to="deaths",
+               names_transform = list(date = ~ gsub("^X", "", .)) # Remove the leading "X"
+              ) %>%
+  select(-c(Lat,Long))
+
+us_deaths<- us_deaths%>%
+  pivot_longer(cols=-c(Province_State,Country_Region,Combined_Key, Admin2,Lat, Long_, UID, iso3,iso2,code3,FIPS,Population),
+               names_to="date",
+               values_to="deaths",
+               names_transform = list(date = ~ gsub("^X", "", .)) # Remove the leading "X"
+              ) %>%
+  select(-c(Lat,Long_, UID, iso3,iso2,code3,FIPS,Country_Region))
+
+
+#combine cases and deaths for global and US, and make date a correct date type
+global<-global_cases%>%
+  full_join(global_deaths)%>%
+  mutate(date=mdy(date))
+us<-us_cases%>%
+  full_join(us_deaths)%>%
+  mutate(date=mdy(date))
+
+summary(global)
+summary(us)
+
+#keep every day when either cases or deaths are greater than 0, see the min for US cases and deaths is in the negatives will also have to deal with that if this doesn't fix it
+global<- global%>%filter(cases>0 | deaths>0)
+us<- us%>%filter(cases>0 | deaths>0)
+
+
+#join in population information
+
+global_pops=read.csv("https://github.com/CSSEGISandData/COVID-19/raw/4360e50239b4eb6b22f3a1759323748f36752177/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv")
+
+colnames(global_pops)[colnames(global_pops) == "Province_State"] <- "Province.State"
+colnames(global_pops)[colnames(global_pops) == "Country_Region"] <- "Country.Region"
+
+# left join and add combined key for global
+global <- global %>%
+  left_join(global_pops, by =c("Province.State", "Country.Region")) %>%
+  select(-c(UID,FIPS)) %>%
+  mutate(Combined_Key = ifelse(is.na(Province.State) | Province.State == "", 
+                           Country.Region, 
+                           paste(Province.State, Country.Region, sep = ", "))) %>%
+  select(Province.State, Country.Region,Combined_Key, date,
+         cases,deaths, Population)
+
+summary(global)
+head(global)
+summary(us)
+head(us)
+
+#some locations don't have population but primarily appears for invalid state or country. For example the winter olympics are listed as a state and another one is a Canadian cruise ship. Still worth keeping in data for overall for cases and deaths but good to note for future geographical analysis.
+distinct_locs_na_pop<-global%>%
+  filter(is.na(Population))%>%
+  distinct(Province.State, Country.Region)
+print(distinct_locs_na_pop)
+
+```
+# Visualizing data
+The first visuals I output were graphs both globally and for just the US that showed the cases and deaths over time. There are so many data points that the data needs to be logarithmic to view. After I compared the two graphs it seemed that the US was a good proportion of cases and deaths globally. From there I visualized the data on a map to see what states and countries (depending on data set) were especially significant. In the US four states California, Florida, Texas, and New York stuck out as the drivers for the US. When looking a the world map the US seems to be the highest contributor for global cases and deaths reported, with Brazil appearing as the second most. There are some countries grayed out on the map due to join issues between the map values and the repository, those likely do have data but do not have high priority to fix as my analysis will primarily focus on countries with a similar age structure to the US.
+```{r, fig.width=15, fig.height=8, out.width="100%"}
+us_by_state<-us%>%
+  group_by(Province_State,date)%>%
+  summarize(cases=sum(cases),deaths=sum(deaths),
+            Population=sum(Population))%>%
+  mutate(deaths_per_mill=deaths*1000000/Population)%>%
+  select(Province_State,date, cases, deaths, deaths_per_mill, Population)%>%
+  ungroup()
+
+us_totals<-us_by_state%>%
+  group_by(date)%>%
+  summarize(cases=sum(cases),deaths=sum(deaths),
+            Population=sum(Population))%>%
+  mutate(deaths_per_mill=deaths*1000000/Population)%>%
+  select(date,cases,deaths,deaths_per_mill,Population)%>%
+  ungroup()
+# plot us cases and deaths over time on a log scale
+us_totals%>%
+  filter(cases>0)%>%
+  ggplot(aes(x=date, y=cases))+
+  geom_line(aes(color="cases"))+
+  geom_point(aes(color="cases"))+
+  geom_line(aes(y=deaths, color="deaths"))+
+  geom_point(aes(y=deaths, color="deaths"))+
+  scale_y_log10()+
+  theme(legend.position = "bottom",
+        axis.text.x=element_text(angle=90))+
+  labs(title="COVID in the US",y=NULL)
+
+global_by_country<-global%>%
+  group_by(Country.Region,date)%>%
+  summarize(cases=sum(cases),deaths=sum(deaths),
+            Population=sum(Population))%>%
+  mutate(deaths_per_mill=deaths*1000000/Population)%>%
+  select(Country.Region,date, cases, deaths, deaths_per_mill, Population)%>%
+  ungroup()
+
+global_totals<-global_by_country%>%
+  group_by(date)%>%
+  summarize(cases=sum(cases),deaths=sum(deaths),
+            Population=sum(Population))%>%
+  mutate(deaths_per_mill=deaths*1000000/Population)%>%
+  select(date,cases,deaths,deaths_per_mill,Population)%>%
+  ungroup()
+
+ # plot global cases and deaths over time on a log scale
+global_totals%>%
+  filter(cases>0)%>%
+  ggplot(aes(x=date, y=cases))+
+  geom_line(aes(color="cases"))+
+  geom_point(aes(color="cases"))+
+  geom_line(aes(y=deaths, color="deaths"))+
+  geom_point(aes(y=deaths, color="deaths"))+
+  scale_y_log10()+
+  theme(legend.position = "bottom",
+        axis.text.x=element_text(angle=90))+
+  labs(title="COVID Globally",y=NULL)
+
+```
+
+```{r, fig.width=15, fig.height=8, out.width="100%"}
+# maps
+#US map
+us_by_state_only<-us_by_state%>%
+  group_by(Province_State)%>%
+  summarize(cases=sum(cases),deaths=sum(deaths),
+            Population=sum(Population))%>%
+  mutate(Province_State = tolower(Province_State))%>%
+  ungroup()
+
+us_states <- map_data("state") %>%
+  mutate(region = tolower(region))  
+map_data <- us_states %>%
+  left_join(us_by_state_only, by = c("region" = "Province_State"))
+
+
+#check state names for any discrepancy
+distinct_statenames<-us_by_state_only%>%
+  distinct(Province_State)
+distinct_statenames<-us_states%>%
+  distinct(region)
+
+# Plot the map of the contiguous US 
+#cases
+ggplot(map_data, aes(long, lat, group = group, fill = cases)) +
+  geom_polygon(color = "white") +
+  scale_fill_gradient(low = "white", high = "red", na.value = "grey50", name = "Cases") +
+  coord_fixed(1.3) +
+  theme_minimal() +
+  labs(title = paste("COVID Cases by State"),
+       x = NULL, y = NULL) +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+#deaths
+ggplot(map_data, aes(long, lat, group = group, fill = deaths)) +
+  geom_polygon(color = "white") +
+  scale_fill_gradient(low = "white", high = "red", na.value = "grey50", name = "Deaths") +
+  coord_fixed(1.3) +
+  theme_minimal() +
+  labs(title = paste("COVID Deaths by State"),
+       x = NULL, y = NULL) +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+
+#global map
+global_by_country_only<-global_by_country%>%
+  group_by(Country.Region)%>%
+  summarize(cases=sum(cases),deaths=sum(deaths),
+            Population=sum(Population))%>%
+  ungroup()
+
+global_map <- map_data("world") 
+global_map<-global_map%>%mutate(region = case_when(
+    region == "USA" ~ "US",
+    region == "UK" ~ "United Kingdom",
+    region == "South Korea" ~ "Korea, South",  
+    region == "North Korea" ~ "Korea, North", 
+    TRUE ~ region
+  ))
+map_data <- global_map %>%
+  left_join(global_by_country_only, by = c("region" = "Country.Region"))
+distinct_country<-map_data%>%
+  distinct(region)
+distinct_country<-global_by_country_only%>%
+  distinct(Country.Region)
+
+# Plot world map
+#cases
+ggplot(map_data, aes(long, lat, group = group, fill = cases)) +
+  geom_polygon(color = "white") +
+  scale_fill_gradient(low = "white", high = "red", na.value = "grey50", name = "Cases") +
+  coord_fixed(1.3) +
+  theme_minimal() +
+  labs(title = paste("COVID Cases by Country"),
+       x = NULL, y = NULL) +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+#deaths
+ggplot(map_data, aes(long, lat, group = group, fill = deaths)) +
+  geom_polygon(color = "white") +
+  scale_fill_gradient(low = "white", high = "red", na.value = "grey50", name = "Deaths") +
+  coord_fixed(1.3) +
+  theme_minimal() +
+  labs(title = paste("COVID Deaths by Country"),
+       x = NULL, y = NULL) +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+```
+
+
+# Analyzing and Modeling data
+
+In the below section I decided to analyze the log linear regression model of cases and deaths in the US and compare it to specific states and similar countries. I used the 4 driving states Texas, Florida, New York, and California as well as 6 countries with a similar age structure to the US being Canada, Germany, Australia, United Kingdom, France, and Japan. From the model summaries there are some key points to bring up. Population seems to have a more significant impact on cases and deaths in the US and especially in the driving states compared to the  similar countries. While Population has a larger impact on the US, it appears that year has a stronger effect on both cases and deaths in similar countries.
+```{r}
+
+#model US
+
+model_US_cases <- lm(log(cases + 1) ~  Population + year(date), data = us_by_state)
+model_us_deaths <- lm(log(deaths + 1) ~  Population + year(date), data = us_by_state)
+summary(model_US_cases)
+summary(model_us_deaths)
+
+#model the 4 driving states
+driving_states<-us_by_state%>%
+  filter(Province_State %in% c( "Texas","Florida", "New York","California"))
+driving_states$Province_State <- factor(driving_states$Province_State)
+
+model_state_cases <- lm(log(cases + 1) ~  Population + year(date), data = driving_states)
+model_state_deaths <- lm(log(deaths + 1) ~  Population + year(date), data = driving_states)
+
+summary(model_state_cases)
+summary(model_state_deaths)
+
+#model 6 countries similar in age structure to the US 
+similar_countries<-global_by_country%>%
+  filter(Country.Region %in% c("Canada", "Germany", "Australia", "United Kingdom", "France","Japan"))
+
+model_country_cases <- lm(log(cases + 1) ~  Population + year(date), data = similar_countries)
+model_country_deaths <- lm(log(deaths + 1) ~  Population + year(date), data = similar_countries)
+
+summary(model_country_cases)
+summary(model_country_deaths)
+
+
+```
+# Conclusion
+
+Given the data set it appears that COVID cases and death most severely affected the US. Texas, Florida, New York, and California are the states that were most affected in the US.  There are several reasons this could be true such as the prevalence of the anti vaccine movement, delayed response (lockdown), and a large population. 
+
+I looked into countries with similar age structures as the US because COVID was more dangerous for older individuals. Even when looking at similar countries appears that other countries possibly handled the pandemic more effectively than the US.
+
+To note bias in this report:
+
+* There could be bias in the data
+  * some countries/states may not have had easy access to testing resulting in lower cases than in actuality. 
+  * Some countries may have different medical standards for how they link deaths to being caused COVID.
+  * To combat this I compared similar countries in age structures, development, and culture.
+* My personal bias comes in with my own experience with COVID. The disruptions to daily life and significant challenges during this time may have influenced my perspective. To combat this I attempted to approach the data with as much objectivity as possibly
+
+
+
+
+
+
+
